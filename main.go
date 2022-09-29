@@ -2,109 +2,67 @@
 package main
 
 import (
-	"context"
-	"errors"
-	"strings"
-	"encoding/json"
+	"net/http"
+	"os"
+	"time"
 
+	"github.com/go-kit/log"
 
 	"github.com/go-kit/kit/endpoint"
+	httptransport "github.com/go-kit/kit/transport/http"
 )
-
-// Define your Requirements or Globally used variables
-var ErrEmpty = errors.New("Empty String")
-
-// Define your business Logics
-
-type StringService interface {
-	Uppercase(string) (string, error)
-	Count(string) int
-}
-
-//---------- Business logic implementation ----------//
-
-// Define your entities
-type stringService struct{}
-
-func (stringService) Uppercase(word string) (string, error) {
-	if word == "" {
-		return "", ErrEmpty
-	}
-	return strings.ToUpper(word), nil
-}
-
-func (stringService) Count(word string) int {
-	return len(word)
-}
-
-//---------- Request Response Messaging Patterns ----------//
-
-// based on our business logic we'll define request response struct for each method of our interface
-
-// Method Uppercase RPC
-type uppercaseRequest struct {
-	S string `json:"s"`
-}
-
-type uppercaseResponse struct {
-	V   string `json:"v"`
-	Err string `json:"err,omitempty"`
-}
-
-// Method Count RPC
-type countRequest struct {
-	Word string `json:"word"`
-}
-
-type countResponse struct {
-	Count int `json:"count"`
-}
 
 //---------- Endpoints ----------//
 // An endpoint represent a single RPC which is a method in our service interface
 
 // adaptors converts each method of our service into an endpoint.
 
-func makeUppercaseEndpoint(svc StringService) endpoint.Endpoint {
-	return func(_ context.Context, request interface{}) (interface{}, error) {
-
-		// type assert the request context to get the uppercase Request struct
-		req := request.(uppercaseRequest)
-
-		// Call the Uppercase method of the service.
-		v, err := svc.Uppercase(req.S)
-
-		if err != nil {
-			return uppercaseResponse{v, err.Error()}, nil
-		}
-		return uppercaseResponse{v, ""}, nil
-	}
+type loggingMiddleware struct {
+	logger log.Logger
+	next   StringService
 }
 
-func makeCountEndpoint(svc StringService) endpoint.Endpoint {
-	return func(_ context.Context, request interface{}) (interface{}, error) {
-
-		// type assert request satisfies the countRequest interface
-		req := request.(countRequest)
-
-		wordLen := svc.Count(req.Word)
-		return countResponse{wordLen}, nil
-	}
+func (mw loggingMiddleware) Uppercase(s string) (output string, err error) {
+	defer func(begin time.Time) {
+		mw.logger.Log(
+			"method", "uppercase",
+			"input", s,
+			"output", output,
+			"err", err,
+			"took", time.Since(begin),
+		)
+	}(time.Now())
+	output, err = mw.next.Uppercase(s)
+	return
 }
 
+func main() {
 
-//---------- Transports ----------//
-
-func main(){
+	logger := log.NewLogfmtLogger(os.Stderr)
 	svc := stringService{}
 
+	//declare and log endpoint
+	var uppercase endpoint.Endpoint
+	uppercase = makeUppercaseEndpoint(svc)
+	uppercase = loggingMiddleware(log.With(logger, "method", "uppercase"))(uppercase)
+
+	var count endpoint.Endpoint
+	count = makeCountEndpoint((svc))
+	count = loggingMiddleware(log.With(logger, "method", "count"))(count)
+
 	uppercaseHandler := httptransport.NewServer(
-		makeUppercaseEndpoint(svc),
+		uppercase,
 		decodeUppercaseRequest,
 		encodeResponse,
 	)
 
 	countHandler := httptransport.NewServer(
-		make
+		count,
+		decodeCountRequest,
+		encodeResponse,
 	)
+
+	http.Handle("/uppercase", uppercaseHandler)
+	http.Handle("/count", countHandler)
+	log.Fatal(http.ListenAndServe(":8080", nil))
 }
